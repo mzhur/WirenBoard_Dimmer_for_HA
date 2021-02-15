@@ -1,0 +1,147 @@
+#!/usr/bin/python3
+import serial
+import modbus_tk
+import modbus_tk.defines as cst
+import time
+from modbus_tk import modbus_rtu
+import socket
+from multiprocessing import Process, Lock, Value
+
+def bad_light(light_values, modbus_addrl, port, type_d, max_v):
+    b_short = 50
+    b_long = 500
+
+    UDP_Socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    UDP_Socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    UDP_Socket.bind(('', port))
+
+    last_value = {}
+    for mda in modbus_addrl:
+        if light_values[mda].value == 0:
+              last_value[mda] = 50
+        else:
+              last_value[mda] = light_values[mda].value
+    if type_d == 1:
+        modbus_addr = modbus_addrl[0]
+        while 1:
+             data, addr = UDP_Socket.recvfrom(2)
+             info = int.from_bytes([data[1], data[0]], byteorder='big')
+             if (info > b_short) and (info < b_long) and (light_values[modbus_addr].value > 0):
+                   last_value[modbus_addr] = light_values[modbus_addr].value
+                   light_values[modbus_addr].value = 0
+
+             elif (info == 1) and (light_values[modbus_addr].value > 5):
+                   light_values[modbus_addr].value = light_values[modbus_addr].value - 1
+                   last_value[modbus_addr] = light_values[modbus_addr].value
+
+             elif (info == 2) and (light_values[modbus_addr].value < max_v[0]) and (light_values[modbus_addr].value > 0):
+                   light_values[modbus_addr].value = light_values[modbus_addr].value + 1
+                   last_value[modbus_addr] = light_values[modbus_addr].value
+
+             elif (info > b_short) and (info < b_long) and (light_values[modbus_addr].value == 0):
+                   light_values[modbus_addr].value = last_value[modbus_addr]
+
+    elif type_d == 2:
+        while 1:
+             data, addr = UDP_Socket.recvfrom(2)
+             i = 1
+             for modbus_addr in modbus_addrl:
+                if (data[0] == i) and (data[1] == 3) and (light_values[modbus_addr].value > 0):
+                      last_value[modbus_addr] = light_values[modbus_addr].value
+                      light_values[modbus_addr].value = 0
+   
+                elif (data[0] == i) and (data[1] == 1) and (light_values[modbus_addr].value > 5):
+                      light_values[modbus_addr].value = light_values[modbus_addr].value - 3
+                      last_value[modbus_addr] = light_values[modbus_addr].value
+  
+                elif (data[0] == i)  and (data[1] == 2) and (light_values[modbus_addr].value < max_v[i-1]) and (light_values[modbus_addr].value > 0):
+                      light_values[modbus_addr].value = light_values[modbus_addr].value + 3
+                      last_value[modbus_addr] = light_values[modbus_addr].value
+
+                elif (data[0] == i) and (data[1] == 0) and (light_values[modbus_addr].value == 0):
+                      light_values[modbus_addr].value = last_value[modbus_addr]
+                i = i+1
+
+def set_bad(lock, master, light_values):
+    model_values = {}
+    for modbus_addr in light_values:
+          model_values[modbus_addr] = light_values[modbus_addr]
+
+    while 1:
+        lock.acquire()
+        for modbus_addr in light_values:
+            if model_values[modbus_addr] != light_values[modbus_addr].value:
+                 m_done=5
+                 while m_done > 0:
+                     try:
+                         main_bright = master.execute(modbus_addr[0], cst.WRITE_SINGLE_REGISTER, modbus_addr[1], output_value=light_values[modbus_addr].value)[1]
+                         m_done=0
+                     except:
+                         time.sleep(0.1)
+                         m_done = m_done - 1
+        lock.release()
+
+
+def light_int(light_values):
+    UDP_Socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    UDP_Socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    UDP_Socket.bind(('', 8585))
+    while 1:
+         data, addr = UDP_Socket.recvfrom(1024)
+         time.sleep(0.5)
+         if data[0] == 1:
+                print('Получаем... команда 1')
+                light_values[(data[1],data[2],)].value = data[3]
+                print(light_values[(data[1],data[2],)].value)
+                 
+         if data[0] == 2:
+                 print('Получаем... команда 2')
+                 UDP_Socket_resp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                 UDP_Socket_resp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                 UDP_Socket_resp.sendto(bytearray([light_values[(data[1],data[2],)].value]), (addr[0], 8586,))
+                 UDP_Socket_resp.close
+
+
+def main():
+    lock = Lock()
+    PORT = '/dev/ttyS0'
+    try:
+        master = modbus_rtu.RtuMaster(serial.Serial(port=PORT, baudrate=9600, bytesize=8, parity='N', stopbits=2, xonxoff=0))
+        master.set_timeout(0.1)
+        master.set_verbose(False)
+    except modbus_tk.modbus.ModbusError as exc:
+        print('stop')
+    light_values = {(60,0,) : Value('i', 0), (60,1,) : Value('i', 0), (60,2,) : Value('i', 0), (108,0,) : Value('i', 0), (108,1,) : Value('i', 0), (108,2,) : Value('i', 0), (108,3,) : Value('i', 0), (100,0,) : Value('i', 0), (100,1,) : Value('i', 0), (100,2,) : Value('i', 0), (100,3,) : Value('i', 0)}
+    living_value = Value('i', 0)
+    tv_value = Value('i', 0)
+    for a in light_values:
+         m_done = 5
+         while m_done > 0:
+            try:
+                light_values[a].value = master.execute(a[0], cst.READ_HOLDING_REGISTERS, a[1], 1)[0]
+                m_done = 0
+            except:
+                time.sleep(0.1)
+                m_done = m_done - 1
+         time.sleep(0.2)
+    process_int = Process(target=light_int, args=(light_values,))
+    process_bad = Process(target=bad_light, args=(light_values, [(60,2,)], 7173, 1, [100],))
+    process_child = Process(target=bad_light, args=(light_values, [(60,1,)], 7171, 1, [100],))
+    process_living = Process(target=bad_light, args=(light_values, [(60,0,), (100,1)], 7172, 2, [100, 255],))
+    process_bad_set = Process(target=set_bad, args=(lock, master, light_values,))
+    
+    process_child.start()
+    process_int.start()
+    process_bad.start()
+    process_bad_set.start()
+    process_living.start()
+    
+    process_child.join()
+    process_bad.join()
+    process_bad_set.join()
+    process_living.join()
+    process_int.join()
+
+
+if __name__ == "__main__":
+    main()

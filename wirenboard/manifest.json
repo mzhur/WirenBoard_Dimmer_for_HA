@@ -1,0 +1,8 @@
+{
+  "domain": "wirenboard",
+  "name": "WirenBoard Light",
+  "documentation": "https://github.com/jnimmo/hass-dmx/",
+  "dependencies": [],
+  "codeowners": [],
+  "requirements": []
+}
